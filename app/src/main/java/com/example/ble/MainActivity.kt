@@ -1,138 +1,162 @@
 package com.example.ble
 
-import android.Manifest
-import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
-import android.content.*
-import android.content.pm.PackageManager
 import android.os.Bundle
-import android.os.IBinder
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import com.example.ble.ui.theme.BLETheme
-@SuppressLint("NewApi")
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.Button
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+
 class MainActivity : ComponentActivity() {
+    enum class Role { NONE, PERIPHERAL, CENTRAL }
 
-    companion object {
-        private const val LOCATION_PERMISSION_REQUEST_CODE = 1001
-    }
-
-    private var bluetoothService: BluetoothLeService? = null
-    private var bound = false
-
-    // 1) ServiceConnection para bind/unbind
-    private val serviceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            val localBinder = binder as? BluetoothLeService.LocalBinder
-            bluetoothService = localBinder?.getService()
-            bound = true
-
-            bluetoothService?.let { service ->
-                if (!service.initialize()) {
-                    Toast.makeText(this@MainActivity, "BLE no soportado", Toast.LENGTH_SHORT).show()
-                    finish()
-                }
-            }
-        }
-
-        override fun onServiceDisconnected(name: ComponentName?) {
-            bluetoothService = null
-            bound = false
-        }
-    }
-
-    // 2) BroadcastReceiver para conexiones GATT
-    private val gattUpdateReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
-                BluetoothLeService.ACTION_GATT_CONNECTED -> {
-                    Toast.makeText(this@MainActivity, "GATT Conectado", Toast.LENGTH_SHORT).show()
-                }
-                BluetoothLeService.ACTION_GATT_DISCONNECTED -> {
-                    Toast.makeText(this@MainActivity, "GATT Desconectado", Toast.LENGTH_SHORT).show()
-                }
-                BluetoothLeService.ACTION_GATT_SERVICES_DISCOVERED -> {
-                    // Obtenemos y mostramos cuántos servicios hay
-                    val services = bluetoothService?.getSupportedGattServices()
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Servicios descubiertos: ${services?.size ?: 0}",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    // Aquí podríamos navegar a otra pantalla o actualizar la UI Compose
-                }
-            }
-        }
-    }
-
+    private lateinit var blePeripheralManager: BlePeripheralManager
+    private lateinit var bleCentralManager: BleCentralManager
+    private var role by mutableStateOf(Role.NONE)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        blePeripheralManager = BlePeripheralManager(this)
+        bleCentralManager    = BleCentralManager(this)
 
-        // 3) Solicitar permiso de ubicación si es necesario
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(
-                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),
-                LOCATION_PERMISSION_REQUEST_CODE
-            )
-        }
-
-        // 4) Bind al BluetoothLeService
-        Intent(this, BluetoothLeService::class.java).also { intent ->
-            bindService(intent, serviceConnection, BIND_AUTO_CREATE)
-        }
-
-        // 5) Registrar BroadcastReceiver para GATT updates con FLAG_NOT_EXPORTED
-        registerReceiver(
-            gattUpdateReceiver,
-            IntentFilter().apply {
-                addAction(BluetoothLeService.ACTION_GATT_CONNECTED)
-                addAction(BluetoothLeService.ACTION_GATT_DISCONNECTED)
-                addAction(BluetoothLeService.ACTION_GATT_SERVICES_DISCOVERED)
-            },
-            Context.RECEIVER_NOT_EXPORTED
-        )
-
-        // 6) Montar la UI Compose
         setContent {
-            BLETheme {
-                BLEScanScreen { device ->
-                    bluetoothService?.connect(device.address)
-                }
+            when (role) {
+                Role.NONE -> RoleSelectionScreen(
+                    onPeripheral = { role = Role.PERIPHERAL; blePeripheralManager.start() },
+                    onCentral    = { role = Role.CENTRAL    /* no startScan aquí */ }
+                )
+                Role.PERIPHERAL -> PeripheralChatScreen(blePeripheralManager)
+                Role.CENTRAL    -> CentralDeviceScanScreen(bleCentralManager)
             }
         }
     }
+}
 
-    // 7) Manejo de la respuesta de permiso
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
+@Composable
+fun RoleSelectionScreen(onPeripheral: () -> Unit, onCentral: () -> Unit) {
+    Column(
+        Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.Center
     ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == LOCATION_PERMISSION_REQUEST_CODE &&
-            (grantResults.isEmpty() || grantResults[0] != PackageManager.PERMISSION_GRANTED)
-        ) {
-            Toast.makeText(
-                this,
-                "Necesitamos permiso de ubicación para escanear BLE",
-                Toast.LENGTH_LONG
-            ).show()
+        Button(onClick = onPeripheral, modifier = Modifier.fillMaxWidth()) {
+            Text("Ser Periférico")
+        }
+        Spacer(Modifier.height(16.dp))
+        Button(onClick = onCentral, modifier = Modifier.fillMaxWidth()) {
+            Text("Ser Central")
+        }
+    }
+}
+
+@Composable
+fun PeripheralChatScreen(blePeripheral: BlePeripheralManager) {
+    var message by remember { mutableStateOf("") }
+    val messages = remember { mutableStateListOf<String>() }
+
+    LaunchedEffect(Unit) {
+        blePeripheral.onMessageReceived = { msg ->
+            messages += "Ellos: $msg"
         }
     }
 
-    // 8) Liberar recursos en onDestroy
-    override fun onDestroy() {
-        super.onDestroy()
-        if (bound) {
-            unbindService(serviceConnection)
-            bound = false
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        LazyColumn(Modifier.weight(1f)) {
+            items(messages) { Text(it) }
         }
-        unregisterReceiver(gattUpdateReceiver)
+        Row(Modifier.fillMaxWidth().padding(8.dp)) {
+            BasicTextField(
+                value = message,
+                onValueChange = { message = it },
+                modifier = Modifier.weight(1f)
+            )
+            Button(onClick = {
+                blePeripheral.sendMessage(message)
+                messages += "Me: $message"
+                message = ""
+            }) {
+                Text("Enviar")
+            }
+        }
+    }
+}
+
+@Suppress("MissingPermission")
+@Composable
+fun CentralDeviceScanScreen(bleCentral: BleCentralManager) {
+    var devices by remember { mutableStateOf(listOf<BluetoothDevice>()) }
+    var connected by remember { mutableStateOf(false) }
+    var showChat by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        bleCentral.onDeviceFound = { dev -> devices = devices + dev }
+    }
+
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        if (!connected && !showChat) {
+            Button(onClick = { bleCentral.startScan() }) {
+                Text("Buscar Periférico")
+            }
+            Spacer(Modifier.height(16.dp))
+            LazyColumn {
+                items(devices) { device ->
+                    Text(
+                        text = "${device.name ?: "Desconocido"} — ${device.address}",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                bleCentral.connect(device)
+                                connected = true
+                                showChat = true
+                            }
+                            .padding(8.dp)
+                    )
+                }
+            }
+        } else if (showChat) {
+            ChatScreen(bleCentral)
+        }
+    }
+}
+
+@Composable
+fun ChatScreen(bleCentral: BleCentralManager) {
+    var message by remember { mutableStateOf("") }
+    val messages = remember { mutableStateListOf<String>() }
+
+    LaunchedEffect(Unit) {
+        bleCentral.onMessageReceived = { msg ->
+            messages += "Ellos: $msg"
+        }
+    }
+
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        LazyColumn(Modifier.weight(1f)) {
+            items(messages) { Text(it) }
+        }
+        Row(Modifier.fillMaxWidth().padding(8.dp)) {
+            BasicTextField(
+                value = message,
+                onValueChange = { message = it },
+                modifier = Modifier.weight(1f)
+            )
+            Button(onClick = {
+                bleCentral.sendMessage(message)
+                messages += "Me: $message"
+                message = ""
+            }) {
+                Text("Enviar")
+            }
+        }
     }
 }
